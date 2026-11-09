@@ -1,6 +1,7 @@
 package com.meowcenzo.music.ui.screens
 
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -11,7 +12,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
@@ -19,21 +24,44 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.meowcenzo.music.MusicViewModel
 import com.meowcenzo.music.data.Song
+import com.meowcenzo.music.data.SortOrder
 import com.meowcenzo.music.ui.Route
 import com.meowcenzo.music.ui.components.ArtworkImage
 import com.meowcenzo.music.ui.components.formatTime
 import com.meowcenzo.music.ui.theme.Meow
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import java.util.Locale
 
+private fun Song.matches(q: String) =
+    q.isEmpty() || title.contains(q, true) || artist.contains(q, true) || album.contains(q, true)
+
+private fun SortOrder.short() = when (this) {
+    SortOrder.TITLE -> "TITLE"
+    SortOrder.ARTIST -> "ARTIST"
+    SortOrder.RECENT -> "NEWEST"
+    SortOrder.DURATION -> "LONGEST"
+}
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun HomeScreen(
     vm: MusicViewModel,
@@ -43,328 +71,479 @@ fun HomeScreen(
     onNavigate: (Route) -> Unit
 ) {
     val songs by vm.songs.collectAsState()
+    val shownSongs by vm.visibleSongs.collectAsState()
+    val recents by vm.recentSongs.collectAsState()
     val playlists by vm.playlists.collectAsState()
     val favs by vm.favorites.collectAsState()
-    val ui by vm.player.ui.collectAsState()
+    val loading by vm.loading.collectAsState()
+    val query by vm.query.collectAsState()
+    val sort by vm.sort.collectAsState()
+
+    // Observe only the two player fields the list needs (not the 4x/second position ticks).
+    val playerFlow = vm.player.ui
+    val playingId by remember(playerFlow) { playerFlow.map { it.songId }.distinctUntilChanged() }
+        .collectAsState(initial = null)
+    val isPlayingNow by remember(playerFlow) { playerFlow.map { it.isPlaying }.distinctUntilChanged() }
+        .collectAsState(initial = false)
 
     var selectedTab by remember { mutableIntStateOf(0) }
     val tabs = listOf("SONGS", "ALBUMS", "ARTISTS", "PLAYLISTS", "FAVS")
 
-    // Blinking animations
-    val dotAlpha by rememberInfiniteTransition(label = "dot").animateFloat(
-        initialValue = 0.2f, targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(800, easing = LinearEasing), RepeatMode.Reverse),
-        label = "dotAlpha"
-    )
-    val cursorAlpha by rememberInfiniteTransition(label = "cursor").animateFloat(
-        initialValue = 1f, targetValue = 0f,
-        animationSpec = infiniteRepeatable(tween(600, easing = LinearEasing), RepeatMode.Reverse),
-        label = "cursorAlpha"
-    )
-    val loadBarWidth by rememberInfiniteTransition(label = "load").animateFloat(
-        initialValue = 0.1f, targetValue = 0.8f,
-        animationSpec = infiniteRepeatable(tween(2500, easing = FastOutSlowInEasing), RepeatMode.Reverse),
-        label = "loadBarWidth"
-    )
+    val q = query.trim()
+    val searching = q.isNotEmpty()
 
-    val albums = remember(songs) { songs.groupBy { it.albumId }.values.map { it.first() }.sortedBy { it.album.lowercase() } }
-    val artists = remember(songs) { songs.groupBy { it.artist }.toList().sortedBy { it.first.lowercase() } }
+    val albums = remember(songs, q) {
+        songs.groupBy { it.albumId }.values.map { it.first() }
+            .filter { q.isEmpty() || it.album.contains(q, true) || it.artist.contains(q, true) }
+            .sortedBy { it.album.lowercase() }
+    }
+    val artists = remember(songs, q) {
+        songs.groupBy { it.artist }.toList()
+            .filter { q.isEmpty() || it.first.contains(q, true) }
+            .sortedBy { it.first.lowercase() }
+    }
+    val shownPlaylists = remember(playlists, q) {
+        playlists.filter { q.isEmpty() || it.name.contains(q, true) }
+    }
+    val favSongs = remember(songs, favs, q) { songs.filter { it.id in favs && it.matches(q) } }
+    val playList = if (selectedTab == 4) favSongs else shownSongs
 
-    // Hardware Button Interaction
+    // Scan feedback: keep the spinner visible at least ~1s, even if the scan is instant.
+    var scanTick by remember { mutableIntStateOf(0) }
+    var holdScan by remember { mutableStateOf(false) }
+    LaunchedEffect(scanTick) {
+        if (scanTick > 0) { holdScan = true; delay(1000); holdScan = false }
+    }
+    val scanning = loading || holdScan
+
+    // RANDOMIZE feedback: stay on the home screen, flash a confirmation, mini player shows the track.
+    var randomTick by remember { mutableIntStateOf(0) }
+    var randomFlash by remember { mutableStateOf(false) }
+    LaunchedEffect(randomTick) {
+        if (randomTick > 0) { randomFlash = true; delay(1200); randomFlash = false }
+    }
+
+    val focusManager = LocalFocusManager.current
+    val listState = rememberLazyListState()
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (listState.isScrollInProgress) focusManager.clearFocus()
+    }
+
     val executeInteraction = remember { MutableInteractionSource() }
     val isExecutePressed by executeInteraction.collectIsPressedAsState()
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Meow.Ink)
-            .statusBarsPadding()
+    // Everything scrolls (header, search, buttons) so the list gets the whole screen.
+    // Only the tab row stays pinned.
+    LazyColumn(
+        state = listState,
+        modifier = Modifier.fillMaxSize().background(Meow.Ink),
+        contentPadding = PaddingValues(bottom = 16.dp)
     ) {
-        // --- TOP HEADER ---
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(6.dp).alpha(dotAlpha).background(Meow.TextHi, CircleShape))
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = "MEOWCENZO".uppercase(Locale.getDefault()),
-                    style = MaterialTheme.typography.headlineMedium.copy(
-                        fontWeight = FontWeight.Black,
-                        letterSpacing = 2.sp,
-                        fontFamily = FontFamily.Monospace
-                    ),
-                    color = Meow.TextHi
-                )
-            }
+        item(key = "header") {
+            HomeHeader(
+                scanning = scanning,
+                trackCount = songs.size,
+                onOpenSettings = onOpenSettings,
+                onScan = { scanTick++; vm.scan() }
+            )
+        }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                Icon(Icons.Rounded.Equalizer, "EQ", tint = Meow.TextHi, modifier = Modifier.size(24.dp).clickable { onOpenEqualizer() })
-                Icon(Icons.Rounded.Refresh, "Refresh", tint = Meow.TextHi, modifier = Modifier.size(24.dp).clickable { /* vm.scan() */ })
+        item(key = "search") {
+            TerminalSearchBar(
+                query = query,
+                onQueryChange = { vm.query.value = it },
+                onSearch = { focusManager.clearFocus() }
+            )
+            Spacer(Modifier.height(12.dp))
+        }
+
+        stickyHeader(key = "tabs") {
+            Box(Modifier.fillMaxWidth().background(Meow.Ink).padding(vertical = 8.dp)) {
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(tabs.size) { index ->
+                        val isSelected = selectedTab == index
+                        Box(
+                            modifier = Modifier
+                                .background(if (isSelected) Meow.TextHi else Meow.Ink, RectangleShape)
+                                .border(1.dp, if (isSelected) Meow.TextHi else Meow.Line, RectangleShape)
+                                .clickable { selectedTab = index }
+                                .padding(horizontal = 16.dp, vertical = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = if (isSelected) "▸ ${tabs[index]}" else tabs[index],
+                                style = MaterialTheme.typography.labelLarge.copy(
+                                    fontWeight = FontWeight.Black,
+                                    fontFamily = FontFamily.Monospace
+                                ),
+                                color = if (isSelected) Meow.Ink else Meow.TextLo
+                            )
+                        }
+                    }
+                }
             }
         }
 
-        // --- COMMAND BAR ---
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp)
-                .background(Meow.PanelHigh, RectangleShape)
-                .border(1.dp, Meow.Line, RectangleShape)
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "> ",
-                style = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Black),
-                color = Meow.TextHi
-            )
-            Text(
-                text = "SEARCH_LIBRARY",
-                style = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
-                color = Meow.TextLo,
-            )
-            Text(
-                text = "_",
-                modifier = Modifier.alpha(cursorAlpha),
-                style = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
-                color = Meow.TextHi
-            )
-            Spacer(Modifier.weight(1f))
-            Icon(Icons.Rounded.Search, "Search", tint = Meow.TextLo, modifier = Modifier.size(20.dp))
-        }
-
-        Spacer(Modifier.height(12.dp))
-
-        // --- TABS ---
-        LazyRow(
-            contentPadding = PaddingValues(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            items(tabs.size) { index ->
-                val isSelected = selectedTab == index
+        item(key = "actions") {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 20.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
                 Box(
                     modifier = Modifier
-                        .background(if (isSelected) Meow.TextHi else Meow.Ink, RectangleShape)
-                        .border(1.dp, if (isSelected) Meow.TextHi else Meow.Line, RectangleShape)
-                        .clickable { selectedTab = index }
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                        .weight(1f)
+                        .height(48.dp)
+                        .background(if (isExecutePressed) Meow.PanelHigh else Meow.TextHi, RectangleShape)
+                        .border(1.dp, Meow.TextHi, RectangleShape)
+                        .clickable(interactionSource = executeInteraction, indication = null) {
+                            if (playList.isNotEmpty()) {
+                                vm.player.playQueue(playList, startIndex = 0)
+                                onOpenPlayer()
+                            }
+                        },
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = if (isSelected) "▸ ${tabs[index]}" else tabs[index],
+                        text = if (isExecutePressed) "[ EXECUTING... ]" else "EXECUTE_ALL",
                         style = MaterialTheme.typography.labelLarge.copy(
-                            fontWeight = FontWeight.Black,
-                            fontFamily = FontFamily.Monospace
+                            fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace
                         ),
-                        color = if (isSelected) Meow.Ink else Meow.TextLo
+                        color = if (isExecutePressed) Meow.TextHi else Meow.Ink
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp)
+                        .background(if (randomFlash) Meow.TextHi else Meow.Ink, RectangleShape)
+                        .border(1.dp, if (randomFlash) Meow.TextHi else Meow.Line, RectangleShape)
+                        .clickable {
+                            if (playList.isNotEmpty()) {
+                                vm.player.playQueue(playList, shuffle = true)
+                                randomTick++            // no onOpenPlayer(): stay on home
+                            }
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = if (randomFlash) "[ SHUFFLED ]" else "RANDOMIZE",
+                        style = MaterialTheme.typography.labelLarge.copy(
+                            fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace
+                        ),
+                        color = if (randomFlash) Meow.Ink else Meow.TextHi
                     )
                 }
             }
         }
 
-        Spacer(Modifier.height(16.dp))
-
-        // --- ACTIONS ---
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            // Play All (Hardware Button)
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .height(48.dp)
-                    .background(if (isExecutePressed) Meow.PanelHigh else Meow.TextHi, RectangleShape)
-                    .border(1.dp, Meow.TextHi, RectangleShape)
-                    .clickable(
-                        interactionSource = executeInteraction,
-                        indication = null
-                    ) {
-                        if (songs.isNotEmpty()) {
-                            vm.player.playQueue(songs, startIndex = 0)
-                            onOpenPlayer()
-                        }
-                    },
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = if (isExecutePressed) "[ EXECUTING... ]" else "EXECUTE_ALL",
-                    style = MaterialTheme.typography.labelLarge.copy(
-                        fontWeight = FontWeight.Black,
-                        fontFamily = FontFamily.Monospace
-                    ),
-                    color = if (isExecutePressed) Meow.TextHi else Meow.Ink
-                )
-            }
-
-            // Shuffle
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .height(48.dp)
-                    .background(Meow.Ink, RectangleShape)
-                    .border(1.dp, Meow.Line, RectangleShape)
-                    .clickable {
-                        if (songs.isNotEmpty()) {
-                            vm.player.playQueue(songs, shuffle = true)
-                            onOpenPlayer()
-                        }
-                    },
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "RANDOMIZE",
-                    style = MaterialTheme.typography.labelLarge.copy(
-                        fontWeight = FontWeight.Black,
-                        fontFamily = FontFamily.Monospace
-                    ),
-                    color = Meow.TextHi
-                )
-            }
-        }
-
-        Spacer(Modifier.height(24.dp))
-
-        // --- SCROLLABLE CONTENT ---
-        LazyColumn(
-            modifier = Modifier.weight(1f).fillMaxWidth(),
-            contentPadding = PaddingValues(bottom = 120.dp)
-        ) {
-            when (selectedTab) {
-                0 -> {
-                    // SONGS TAB
-                    item {
+        when (selectedTab) {
+            0 -> {
+                if (!searching && recents.isNotEmpty()) {
+                    item(key = "recents") {
                         SectionHeader("// RECENT_EXECUTIONS")
                         LazyRow(
                             contentPadding = PaddingValues(horizontal = 16.dp),
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            itemsIndexed(songs.take(5), key = { _, s -> s.id }) { index, song ->
+                            itemsIndexed(recents.take(10), key = { _, s -> s.id }) { index, song ->
                                 RecentlyPlayedCard(index, song) {
-                                    vm.player.playQueue(songs, startIndex = index)
+                                    vm.player.playQueue(recents, startIndex = index)
                                     onOpenPlayer()
                                 }
                             }
                         }
                         Spacer(Modifier.height(24.dp))
                     }
+                }
 
-                    item {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "// DATABASE [${songs.size}]".uppercase(Locale.getDefault()),
-                                style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace),
-                                color = Meow.TextLo
-                            )
-                            Icon(Icons.Rounded.Sort, "Sort", tint = Meow.TextHi, modifier = Modifier.size(20.dp))
+                item(key = "dbheader") {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "// DATABASE [${shownSongs.size}]",
+                            style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace),
+                            color = Meow.TextLo
+                        )
+                        SortChip(sort.short()) {
+                            val all = SortOrder.values()
+                            vm.sort.value = all[(sort.ordinal + 1) % all.size]
                         }
                     }
+                }
 
-                    itemsIndexed(songs, key = { _, s -> s.id }) { index, song ->
+                if (shownSongs.isEmpty()) {
+                    item(key = "empty-songs") {
+                        EmptyState(if (songs.isEmpty()) "// NO_AUDIO_FILES_FOUND" else "// NO_MATCH: \"$q\"")
+                    }
+                } else {
+                    itemsIndexed(shownSongs, key = { _, s -> s.id }) { index, song ->
                         SongListItem(
                             index = index,
                             song = song,
-                            isPlaying = ui.songId == song.id && ui.isPlaying,
-                            isActive = ui.songId == song.id,
-                            cursorAlpha = cursorAlpha
+                            isPlaying = playingId == song.id && isPlayingNow,
+                            isActive = playingId == song.id
                         ) {
-                            vm.player.playQueue(songs, startIndex = index)
-                            onOpenPlayer()
-                        }
-                    }
-                }
-                1 -> {
-                    items(albums, key = { it.albumId }) { album ->
-                        AlbumListItem(album) { onNavigate(Route.Album(album.albumId, album.album)) }
-                    }
-                }
-                2 -> {
-                    items(artists, key = { it.first }) { (artistName, artistSongs) ->
-                        // Passed the first song of the artist to get its album art
-                        ArtistListItem(
-                            artistName = artistName,
-                            songCount = artistSongs.size,
-                            representativeSong = artistSongs.first()
-                        ) {
-                            onNavigate(Route.Artist(artistName))
-                        }
-                    }
-                }
-                3 -> {
-                    items(playlists, key = { it.id }) { playlist ->
-                        PlaylistListItem(playlist.name, playlist.songIds.size) { onNavigate(Route.PlaylistRoute(playlist.id)) }
-                    }
-                }
-                4 -> {
-                    val favSongs = songs.filter { it.id in favs }
-                    itemsIndexed(favSongs, key = { _, s -> s.id }) { index, song ->
-                        SongListItem(
-                            index = index,
-                            song = song,
-                            isPlaying = ui.songId == song.id && ui.isPlaying,
-                            isActive = ui.songId == song.id,
-                            cursorAlpha = cursorAlpha
-                        ) {
-                            vm.player.playQueue(favSongs, startIndex = index)
+                            vm.player.playQueue(shownSongs, startIndex = index)
                             onOpenPlayer()
                         }
                     }
                 }
             }
-        }
-
-        // --- BOTTOM SYSTEM TASKBAR ---
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(Meow.PanelHigh)
-                .border(1.dp, Meow.Line, RectangleShape)
-                .padding(horizontal = 16.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // Fake Load Indicator
-            Row(
-                modifier = Modifier.weight(1f),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "SYS:",
-                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                    color = Meow.TextLo
-                )
-                Spacer(Modifier.width(8.dp))
-                Box(
-                    modifier = Modifier
-                        .width(60.dp)
-                        .height(6.dp)
-                        .background(Meow.Ink, RectangleShape)
-                        .border(1.dp, Meow.Line, RectangleShape)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth(loadBarWidth)
-                            .fillMaxHeight()
-                            .background(Meow.TextHi)
-                    )
+            1 -> {
+                if (albums.isEmpty()) item(key = "empty-albums") { EmptyState("// NO_ALBUMS") }
+                items(albums, key = { it.albumId }) { album ->
+                    AlbumListItem(album) { onNavigate(Route.Album(album.albumId, album.album)) }
                 }
             }
-
-            Text(
-                text = "TRACKS: ${songs.size} | MODE: LOCAL",
-                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                color = Meow.TextLo
-            )
+            2 -> {
+                if (artists.isEmpty()) item(key = "empty-artists") { EmptyState("// NO_ARTISTS") }
+                items(artists, key = { it.first }) { (artistName, artistSongs) ->
+                    ArtistListItem(
+                        artistName = artistName,
+                        songCount = artistSongs.size,
+                        representativeSong = artistSongs.first()
+                    ) { onNavigate(Route.Artist(artistName)) }
+                }
+            }
+            3 -> {
+                if (shownPlaylists.isEmpty()) item(key = "empty-playlists") { EmptyState("// NO_PLAYLISTS") }
+                items(shownPlaylists, key = { it.id }) { playlist ->
+                    PlaylistListItem(playlist.name, playlist.songIds.size) {
+                        onNavigate(Route.PlaylistRoute(playlist.id))
+                    }
+                }
+            }
+            4 -> {
+                if (favSongs.isEmpty()) item(key = "empty-favs") { EmptyState("// NO_FAVOURITES") }
+                itemsIndexed(favSongs, key = { _, s -> s.id }) { index, song ->
+                    SongListItem(
+                        index = index,
+                        song = song,
+                        isPlaying = playingId == song.id && isPlayingNow,
+                        isActive = playingId == song.id
+                    ) {
+                        vm.player.playQueue(favSongs, startIndex = index)
+                        onOpenPlayer()
+                    }
+                }
+            }
         }
     }
+}
+
+// =====================================================================================
+// Header: title + live status on the left, boxed EQ / SCAN buttons on the right
+// =====================================================================================
+
+@Composable
+private fun HomeHeader(
+    scanning: Boolean,
+    trackCount: Int,
+    onOpenSettings: () -> Unit,
+    onScan: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                BlinkDot()
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = "MEOWCENZO",
+                    style = MaterialTheme.typography.headlineMedium.copy(
+                        fontWeight = FontWeight.Black,
+                        letterSpacing = 2.sp,
+                        fontFamily = FontFamily.Monospace
+                    ),
+                    color = Meow.TextHi,
+                    maxLines = 1
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = if (scanning) "// SCANNING_LIBRARY..." else "// $trackCount TRACKS INDEXED",
+                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                color = if (scanning) Meow.TextHi else Meow.TextLo,
+                modifier = Modifier.padding(start = 14.dp)
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            HeaderButton(Icons.Rounded.Settings, "SETTINGS", active = false, onClick = onOpenSettings)
+            ScanButton(scanning, onScan)
+        }
+    }
+}
+
+@Composable
+private fun BlinkDot() {
+    val a by rememberInfiniteTransition(label = "dot").animateFloat(
+        initialValue = 0.2f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(800, easing = LinearEasing), RepeatMode.Reverse),
+        label = "dotAlpha"
+    )
+    // alpha is read inside graphicsLayer (draw phase): no recomposition per frame.
+    Box(Modifier.size(6.dp).graphicsLayer { alpha = a }.background(Meow.TextHi, CircleShape))
+}
+
+/** Blinking "_" that owns its own animation, so rows never recompose per frame. */
+@Composable
+fun BlinkCursor(style: TextStyle, color: Color = Meow.TextHi) {
+    val a by rememberInfiniteTransition(label = "cursor").animateFloat(
+        initialValue = 1f, targetValue = 0f,
+        animationSpec = infiniteRepeatable(tween(600, easing = LinearEasing), RepeatMode.Reverse),
+        label = "cursorAlpha"
+    )
+    Text("_", modifier = Modifier.graphicsLayer { alpha = a }, style = style, color = color)
+}
+
+@Composable
+private fun HeaderButton(
+    icon: ImageVector,
+    label: String,
+    active: Boolean,
+    onClick: () -> Unit,
+    iconModifier: Modifier = Modifier,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val fg = if (pressed) Meow.Ink else Meow.TextHi
+    Column(
+        Modifier
+            .size(width = 52.dp, height = 48.dp)
+            .background(if (pressed) Meow.TextHi else Meow.PanelHigh, RectangleShape)
+            .border(1.dp, if (active || pressed) Meow.TextHi else Meow.Line, RectangleShape)
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Icon(icon, label, tint = fg, modifier = iconModifier.size(20.dp))
+        Spacer(Modifier.height(3.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall.copy(
+                fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 8.sp
+            ),
+            color = if (pressed) Meow.Ink else if (active) Meow.TextHi else Meow.TextLo,
+            maxLines = 1
+        )
+    }
+}
+
+@Composable
+private fun ScanButton(scanning: Boolean, onClick: () -> Unit) {
+    val rot: State<Float> = if (scanning) {
+        rememberInfiniteTransition(label = "scan").animateFloat(
+            initialValue = 0f, targetValue = 360f,
+            animationSpec = infiniteRepeatable(tween(900, easing = LinearEasing)),
+            label = "scanRot"
+        )
+    } else {
+        remember { mutableFloatStateOf(0f) }
+    }
+    HeaderButton(
+        icon = Icons.Rounded.Refresh,
+        label = if (scanning) "WAIT" else "SCAN",
+        active = scanning,
+        onClick = onClick,
+        iconModifier = Modifier.graphicsLayer { rotationZ = rot.value }
+    )
+}
+
+// =====================================================================================
+// Search field (real text input, same terminal look as before)
+// =====================================================================================
+
+@Composable
+private fun TerminalSearchBar(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    onSearch: () -> Unit,
+) {
+    var focused by remember { mutableStateOf(false) }
+    val mono = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace)
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .background(Meow.PanelHigh, RectangleShape)
+            .border(1.dp, if (focused) Meow.TextHi else Meow.Line, RectangleShape)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("> ", style = mono.copy(fontWeight = FontWeight.Black), color = Meow.TextHi)
+        Box(Modifier.weight(1f)) {
+            if (query.isEmpty()) {
+                Row {
+                    Text("SEARCH_LIBRARY", style = mono, color = Meow.TextLo)
+                    if (!focused) BlinkCursor(mono)   // fake cursor only while idle
+                }
+            }
+            BasicTextField(
+                value = query,
+                onValueChange = { onQueryChange(it.take(60)) },
+                singleLine = true,
+                textStyle = mono.copy(color = Meow.TextHi),
+                cursorBrush = SolidColor(Meow.TextHi),
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.Characters,
+                    imeAction = ImeAction.Search
+                ),
+                keyboardActions = KeyboardActions(onSearch = { onSearch() }),
+                modifier = Modifier.fillMaxWidth().onFocusChanged { focused = it.isFocused }
+            )
+        }
+        if (query.isNotEmpty()) {
+            Box(
+                Modifier.size(28.dp).clickable { onQueryChange("") },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Rounded.Close, "Clear", tint = Meow.TextHi, modifier = Modifier.size(20.dp))
+            }
+        } else {
+            Icon(Icons.Rounded.Search, "Search", tint = Meow.TextLo, modifier = Modifier.size(20.dp))
+        }
+    }
+}
+
+@Composable
+private fun SortChip(label: String, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .border(1.dp, Meow.Line, RectangleShape)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(Icons.Rounded.Sort, "Sort", tint = Meow.TextHi, modifier = Modifier.size(16.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = "SORT:$label",
+            style = MaterialTheme.typography.labelSmall.copy(
+                fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold
+            ),
+            color = Meow.TextHi
+        )
+    }
+}
+
+@Composable
+private fun EmptyState(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+        color = Meow.TextLo,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 24.dp)
+    )
 }
 
 @Composable
@@ -433,7 +612,6 @@ fun SongListItem(
     song: Song,
     isActive: Boolean,
     isPlaying: Boolean,
-    cursorAlpha: Float,
     onClick: () -> Unit
 ) {
     Column {
@@ -476,12 +654,7 @@ fun SongListItem(
                         overflow = TextOverflow.Ellipsis
                     )
                     if (isActive) {
-                        Text(
-                            text = "_",
-                            modifier = Modifier.alpha(cursorAlpha),
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Black),
-                            color = Meow.TextHi
-                        )
+                        BlinkCursor(MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Black))
                     }
                 }
                 Text(

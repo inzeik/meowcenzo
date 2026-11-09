@@ -7,4 +7,6 @@ sealed interface Route {
     data class FolderRoute(val path: String) : Route
     data object MostPlayed : Route
     data object Equalizer : Route
+    data object Settings : Route
+    data object About : Route
 }

@@ -72,10 +72,24 @@ class PlayerController(context: Context) {
         }
     }
 
+    private var lastMarkedId: Long? = null
+
+    private fun mark(id: Long) {
+        lastMarkedId = id
+        onTrackStarted?.invoke(id)
+    }
+
     private val listener = object : Player.Listener {
         override fun onEvents(player: Player, events: Player.Events) = sync(player)
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-            mediaItem?.mediaId?.toLongOrNull()?.let { onTrackStarted?.invoke(it) }
+            mediaItem?.mediaId?.toLongOrNull()?.let { mark(it) }
+        }
+        // Also count a play when playback actually starts on a track we have not counted yet
+        // (e.g. the queue restored after restart, then you press play).
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            if (!isPlaying) return
+            val id = controller?.currentMediaItem?.mediaId?.toLongOrNull() ?: return
+            if (id != lastMarkedId) mark(id)
         }
     }
 
@@ -113,7 +127,7 @@ class PlayerController(context: Context) {
             title = item?.mediaMetadata?.title?.toString().orEmpty(),
             artist = item?.mediaMetadata?.artist?.toString().orEmpty(),
             isPlaying = p.playWhenReady &&
-                p.playbackState != Player.STATE_ENDED && p.playbackState != Player.STATE_IDLE,
+                    p.playbackState != Player.STATE_ENDED && p.playbackState != Player.STATE_IDLE,
             positionMs = p.currentPosition.coerceAtLeast(0L),
             durationMs = p.duration.takeIf { it != C.TIME_UNSET } ?: 0L,
             shuffle = p.shuffleModeEnabled,
@@ -149,7 +163,9 @@ class PlayerController(context: Context) {
     fun seekToFraction(f: Float) {
         val c = controller ?: return
         val dur = c.duration.takeIf { it != C.TIME_UNSET } ?: return
-        c.seekTo((dur * f.coerceIn(0f, 1f)).toLong())
+        val target = (dur * f.coerceIn(0f, 1f)).toLong()
+        c.seekTo(target)
+        _ui.update { it.copy(positionMs = target, durationMs = dur) }   // UI reacts instantly
     }
 
     fun toggleShuffle() { controller?.let { it.shuffleModeEnabled = !it.shuffleModeEnabled } }

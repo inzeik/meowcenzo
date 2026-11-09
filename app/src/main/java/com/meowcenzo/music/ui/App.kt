@@ -41,12 +41,15 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.meowcenzo.music.MusicViewModel
 import com.meowcenzo.music.data.Song
+import com.meowcenzo.music.ui.components.BottomDock
 import com.meowcenzo.music.ui.components.NamePlaylistDialog
 import com.meowcenzo.music.ui.components.PlaylistPickerDialog
 import com.meowcenzo.music.ui.components.SongOptionsSheet
 import com.meowcenzo.music.ui.screens.DetailScreen
 import com.meowcenzo.music.ui.screens.EqualizerScreen
+import com.meowcenzo.music.ui.screens.AboutScreen
 import com.meowcenzo.music.ui.screens.HomeScreen
+import com.meowcenzo.music.ui.screens.SettingsScreen
 import com.meowcenzo.music.ui.screens.MiniPlayer
 import com.meowcenzo.music.ui.screens.NowPlayingScreen
 import com.meowcenzo.music.ui.theme.Meow
@@ -81,7 +84,6 @@ fun MeowcenzoApp(vm: MusicViewModel = viewModel()) {
 
 @Composable
 private fun Shell(vm: MusicViewModel) {
-    val ui by vm.player.ui.collectAsState()
     val songs by vm.songs.collectAsState()
     val songMap by vm.songMap.collectAsState()
     val favs by vm.favorites.collectAsState()
@@ -96,9 +98,8 @@ private fun Shell(vm: MusicViewModel) {
     var pendingSong by remember { mutableStateOf<Song?>(null) }
     var showNewPlaylist by remember { mutableStateOf(false) }
 
-    val miniVisible = ui.songId != null
-    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-    val bottomPad = navBottom + if (miniVisible) 96.dp else 16.dp
+    // The BottomDock now sits under the content in a Column, so screens only need a small gap.
+    val bottomPad = 16.dp
 
     BackHandler(enabled = showNow) { showNow = false }
     BackHandler(enabled = !showNow && stack.isNotEmpty()) { stack = stack.dropLast(1) }
@@ -111,50 +112,58 @@ private fun Shell(vm: MusicViewModel) {
     }
 
     Box(Modifier.fillMaxSize().background(Meow.Ink)) {
-        Box(Modifier.fillMaxSize().statusBarsPadding()) {
-            when (val route = stack.lastOrNull()) {
-                null -> HomeScreen(
-                    vm = vm,
-                    onOpenPlayer = { showNow = true },
-                    onOpenSettings = { /* TODO: Settings Navigation */ },
-                    onOpenEqualizer = { push(Route.Equalizer) },
-                    onNavigate = push
-                )
-                is Route.Album -> {
-                    val list = songs.filter { it.albumId == route.id && it.album == route.name }.sortedBy { it.track }
-                    DetailScreen(vm, route.name, list.firstOrNull()?.artist.orEmpty(), list, bottomPad, pop, openOptions)
-                }
-                is Route.Artist -> {
-                    val list = songs.filter { it.artist == route.name }.sortedBy { it.album.lowercase() }
-                    DetailScreen(vm, route.name, "${list.size} songs", list, bottomPad, pop, openOptions)
-                }
-                is Route.FolderRoute -> {
-                    val list = songs.filter { it.folderPath == route.path }.sortedBy { it.title.lowercase() }
-                    DetailScreen(vm, list.firstOrNull()?.folderName ?: "Folder", route.path, list, bottomPad, pop, openOptions)
-                }
-                is Route.PlaylistRoute -> {
-                    val p = playlists.find { it.id == route.id }
-                    if (p == null) {
-                        LaunchedEffect(Unit) { pop() }
-                    } else {
-                        val list = p.songIds.mapNotNull { songMap[it] }
-                        DetailScreen(
-                            vm, p.name, "${list.size} songs", list, bottomPad, pop, openOptions,
-                            onDeleteList = { vm.deletePlaylist(p.id); pop() },
-                        )
+        Column(Modifier.fillMaxSize().imePadding()) {   // keyboard pushes the dock up instead of covering it
+            Box(Modifier.weight(1f).fillMaxWidth().statusBarsPadding()) {
+                when (val route = stack.lastOrNull()) {
+                    null -> HomeScreen(
+                        vm = vm,
+                        onOpenPlayer = { showNow = true },
+                        onOpenSettings = { push(Route.Settings) },
+                        onOpenEqualizer = { push(Route.Equalizer) },
+                        onNavigate = push
+                    )
+                    is Route.Album -> {
+                        val list = songs.filter { it.albumId == route.id && it.album == route.name }.sortedBy { it.track }
+                        DetailScreen(vm, route.name, list.firstOrNull()?.artist.orEmpty(), list, bottomPad, pop, openOptions)
                     }
+                    is Route.Artist -> {
+                        val list = songs.filter { it.artist == route.name }.sortedBy { it.album.lowercase() }
+                        DetailScreen(vm, route.name, "${list.size} songs", list, bottomPad, pop, openOptions)
+                    }
+                    is Route.FolderRoute -> {
+                        val list = songs.filter { it.folderPath == route.path }.sortedBy { it.title.lowercase() }
+                        DetailScreen(vm, list.firstOrNull()?.folderName ?: "Folder", route.path, list, bottomPad, pop, openOptions)
+                    }
+                    is Route.PlaylistRoute -> {
+                        val p = playlists.find { it.id == route.id }
+                        if (p == null) {
+                            LaunchedEffect(Unit) { pop() }
+                        } else {
+                            val list = p.songIds.mapNotNull { songMap[it] }
+                            DetailScreen(
+                                vm, p.name, "${list.size} songs", list, bottomPad, pop, openOptions,
+                                onDeleteList = { vm.deletePlaylist(p.id); pop() },
+                            )
+                        }
+                    }
+                    Route.MostPlayed ->
+                        DetailScreen(vm, "Most played", "${mostPlayed.size} songs", mostPlayed, bottomPad, pop, openOptions)
+                    Route.Equalizer -> EqualizerScreen(onBack = pop, bottomPad = bottomPad)
+                    Route.Settings -> SettingsScreen(
+                        onBack = pop,
+                        onOpenEqualizer = { push(Route.Equalizer) },
+                        onOpenAbout = { push(Route.About) },
+                    )
+                    Route.About -> AboutScreen(onBack = pop)
                 }
-                Route.MostPlayed ->
-                    DetailScreen(vm, "Most played", "${mostPlayed.size} songs", mostPlayed, bottomPad, pop, openOptions)
-                Route.Equalizer -> EqualizerScreen(onBack = pop, bottomPad = bottomPad)
             }
-        }
 
-        if (miniVisible && !showNow) {
-            MiniPlayer(
+
+            BottomDock(
                 vm = vm,
-                onOpen = { showNow = true },
-                modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 10.dp),
+                showMiniPlayer = !showNow,
+                showTaskbar = stack.isEmpty(),   // the SYS taskbar belongs to the home screen only
+                onOpenPlayer = { showNow = true },
             )
         }
 

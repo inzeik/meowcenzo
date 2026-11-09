@@ -1,41 +1,70 @@
-# Meowcenzo offline player: drop-in code
+# MEOWCENZO
 
-Kotlin + Jetpack Compose + Media3. No internet permission, no third-party image library.
+```
+ /\_/\
+( o.o )   an offline, local audio player
+ > ^ <    terminal look. zero rounded corners.
+```
 
-## Install (5 steps)
-1. Copy everything under `app/src/main/java/com/example/meowcenzo/` into your project.
-   If your package is not `com.meowcenzo.music`, rename the package lines and imports.
-   Replace your existing `MainActivity.kt` and `ui/theme/Theme.kt` with these.
-2. Copy `res/drawable/ic_meow_fg.xml`, `res/values/meow_colors.xml` and the two
-   `res/mipmap-anydpi-v26/*.xml` files (rectangular launcher icon).
-3. Paste `app/build.gradle.kts.dependencies.txt` into your `dependencies { }`.
-4. Merge `AndroidManifest.additions.xml` into your manifest (permissions + `PlaybackService`).
-5. Run on a device with music files. Tap "Allow access".
+Meowcenzo plays the music that is already on your phone. No account, no cloud, no tracking.
+The app does not request the INTERNET permission.
 
-Needs minSdk 24+ and a recent compileSdk (35 or newer).
+Built with Kotlin, Jetpack Compose and AndroidX Media3.
 
-## What you get
-| Idea from | Feature here |
-|---|---|
-| SoundCloud | Waveform scrubber (tap or drag), gradient progress, recently played row |
-| Apple Music | Now Playing tinted from album art, art shrinks when paused, queue sheet, Play next / Add to queue |
-| Samsung Music | Songs / Albums / Artists / Playlists / Folders tabs, sort menu, favourites |
-| Groove Music | Bold album tiles, Most played list, minimal chrome |
-| Player basics | Shuffle, repeat off/all/one, speed 0.75x to 2x, sleep timer, gapless, lock-screen and Bluetooth controls, pauses on unplug |
-| Audio | System equalizer with presets, per-band sliders, bass boost (settings saved) |
-| Library | Offline MediaStore scan, search, rescan button, playlists, history, play counts |
+## Features
 
-## The rectangle rule
-Every tappable thing is a rounded rectangle: `RectButton`, `GradientPlayButton` (a wide tile),
-tabs, artwork, slider thumb, waveform bars, the playing-bars indicator and the launcher icon.
-Tokens live in `ui/theme/Theme.kt` (`Meow.TileSmall / Tile / TileLarge`). Change one radius there
-and the whole app follows.
+**Library**
+- Reads your music through MediaStore, rescans automatically when files are added or removed
+- Tabs: Songs, Albums, Artists, Playlists, Favourites
+- Live search, sort (title / artist / newest / longest), recently played row
+- Playlists, favourites and play counts stored on the device
+- Track info screen with full metadata and technical details (format, bitrate, sample rate, bit depth, size, path)
+- Edit title, artist, album and track number (saved inside Meowcenzo; the audio file's own tags are not modified)
 
-## Not verified
-- I could not open your repo's `app/` folder (GitHub blocks automated access), so package name,
-  theme name and existing files are assumed from a standard Compose template.
-- This was written without a Kotlin compiler, so expect a few small import or version fixes on first build.
+**Playback**
+- Background playback with notification, lock-screen and Bluetooth/headset controls
+- Shuffle, repeat (off / all / one), speed 0.75x to 2x, sleep timer
+- Queue view, play next, add to queue, queue restored after the app restarts
+- Tuned buffering so seeking in hi-res files (24-bit FLAC, ALAC) resumes quickly
+- Equalizer with bands, presets and bass boost
 
-## Good next steps
-Restore the queue after restart, drag-to-reorder queue, lyrics (.lrc beside the file),
-ContentObserver to auto-rescan, crossfade, Room if playlists grow large, custom font in `res/font`.
+**Interface**
+- Monochrome terminal design: monospace type, sharp rectangles, 1dp borders
+- Now Playing with 3D tilt artwork, segmented visualizer (decorative) and a joined transport bar
+- Settings and About screens
+
+## Install
+
+Download the latest `.apk` from the [Releases](../../releases) page and open it on your phone.
+Android will ask you to allow installing apps from your browser or file manager.
+
+Requires Android 8.0 (API 26) or newer.
+
+## Build from source
+
+1. Install Android Studio and open this folder.
+2. Let Gradle sync (JDK 17).
+3. Run on a device or emulator that has music files.
+4. Tap "Allow access" on first launch.
+
+Debug APK: `Build > Build Bundle(s) / APK(s) > Build APK(s)`, output in `app/build/outputs/apk/debug/`.
+
+## Screenshots
+
+<!-- Put images in docs/screenshots/ and link them here, for example:
+![Home](docs/screenshots/home.png)
+-->
+
+## Roadmap
+
+- Folders tab and Most Played screen (the data is already collected)
+- Drag-to-reorder queue
+- Synced lyrics
+- Real audio-reactive visualizer
+- Crossfade and volume normalization
+- Home-screen widget
+- Writing tags into the audio files
+
+## License
+
+MIT, see [LICENSE](LICENSE).

@@ -1,23 +1,32 @@
 package com.meowcenzo.music
 
+import android.Manifest
 import android.app.Application
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.meowcenzo.music.data.Album
 import com.meowcenzo.music.data.Artist
 import com.meowcenzo.music.data.Folder
+import com.meowcenzo.music.data.audioChanges
 import com.meowcenzo.music.data.LibraryStore
 import com.meowcenzo.music.data.MediaStoreScanner
+import com.meowcenzo.music.data.MetaOverride
+import com.meowcenzo.music.data.MetadataStore
 import com.meowcenzo.music.data.Playlist
 import com.meowcenzo.music.data.Song
 import com.meowcenzo.music.data.SortOrder
 import com.meowcenzo.music.playback.EqualizerManager
 import com.meowcenzo.music.playback.PlayerController
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -27,6 +36,11 @@ import java.util.UUID
 class MusicViewModel(app: Application) : AndroidViewModel(app) {
 
     private val store = LibraryStore(app)
+    private val metaStore = MetadataStore(app)
+    private var overrides: Map<Long, MetaOverride> = metaStore.all()
+    private val _edited = MutableStateFlow(overrides.keys.toSet())
+    /** Ids of songs whose title/artist/album were edited inside Meowcenzo. */
+    val editedIds: StateFlow<Set<Long>> = _edited.asStateFlow()
     val player = PlayerController(app)
 
     private val _songs = MutableStateFlow<List<Song>>(emptyList())
@@ -105,14 +119,59 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         EqualizerManager.init(app)
         player.onTrackStarted = ::markPlayed
         player.connect()
+
+        // Auto-rescan when audio files are added/removed on the device.
+        viewModelScope.launch {
+            app.contentResolver.audioChanges().collectLatest {
+                delay(2000) // wait for bulk copies to finish
+                if (hasAudioPermission()) scan(silent = true)
+            }
+        }
     }
 
-    fun scan() {
+    fun scan(silent: Boolean = false) {
         viewModelScope.launch {
-            _loading.value = true
-            _songs.value = MediaStoreScanner.scan(getApplication())
+            if (!silent) _loading.value = true
+            _songs.value = MediaStoreScanner.scan(getApplication()).withOverrides()
             _loading.value = false
         }
+    }
+
+    private fun List<Song>.withOverrides(): List<Song> =
+        if (overrides.isEmpty()) this else map { s ->
+            overrides[s.id]?.let { o ->
+                s.copy(title = o.title, artist = o.artist, album = o.album, track = o.track)
+            } ?: s
+        }
+
+    // ---- Metadata editing (kept in the app's own library; file tags are untouched) -----------
+
+    fun updateMetadata(id: Long, title: String, artist: String, album: String, track: Int) {
+        val o = MetaOverride(
+            title = title.trim(),
+            artist = artist.trim().ifBlank { "Unknown artist" },
+            album = album.trim().ifBlank { "Unknown album" },
+            track = track.coerceAtLeast(0),
+        )
+        overrides = overrides + (id to o)
+        metaStore.save(overrides)
+        _edited.value = overrides.keys.toSet()
+        _songs.value = _songs.value.map {
+            if (it.id == id) it.copy(title = o.title, artist = o.artist, album = o.album, track = o.track) else it
+        }
+    }
+
+    fun resetMetadata(id: Long) {
+        overrides = overrides - id
+        metaStore.save(overrides)
+        _edited.value = overrides.keys.toSet()
+        scan(silent = true)   // reload the original file tags
+    }
+
+    private fun hasAudioPermission(): Boolean {
+        val p = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO
+        else Manifest.permission.READ_EXTERNAL_STORAGE
+        return ContextCompat.checkSelfPermission(getApplication(), p) == PackageManager.PERMISSION_GRANTED
     }
 
     // ---- Playback shortcuts ------------------------------------------------------------------

@@ -7,6 +7,8 @@ import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
@@ -18,9 +20,11 @@ import com.google.common.util.concurrent.ListenableFuture
  * Foreground playback service. Owns the ExoPlayer, the system media notification,
  * lock-screen controls, Bluetooth / headset buttons and Android Auto-style sessions.
  */
+@androidx.annotation.OptIn(UnstableApi::class)
 class PlaybackService : MediaSessionService() {
 
     private var session: MediaSession? = null
+    private var queueStore: QueueStore? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -31,7 +35,21 @@ class PlaybackService : MediaSessionService() {
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build()
 
+        // The default LoadControl waits for ~2.5 s of audio (5 s after a rebuffer) before playing again
+        // after every seek. With hi-res 24-bit FLAC / ALAC that is a long pause. These values resume
+        // almost instantly; local files read fast, so the small start threshold is safe.
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                /* minBufferMs = */ 15_000,
+                /* maxBufferMs = */ 30_000,
+                /* bufferForPlaybackMs = */ 150,
+                /* bufferForPlaybackAfterRebufferMs = */ 300,
+            )
+            .setPrioritizeTimeOverSizeThresholds(true)   // hi-res files are big per second
+            .build()
+
         val player = ExoPlayer.Builder(this)
+            .setLoadControl(loadControl)
             .setAudioAttributes(attrs, /* handleAudioFocus = */ true)
             .setHandleAudioBecomingNoisy(true)   // pause when headphones unplug
             .setWakeMode(C.WAKE_MODE_LOCAL)
@@ -61,6 +79,11 @@ class PlaybackService : MediaSessionService() {
         // Initial attach attempt
         if (player.audioSessionId != C.AUDIO_SESSION_ID_UNSET) {
             EqualizerManager.attach(player.audioSessionId)
+        }
+
+        queueStore = QueueStore(this).also {
+            it.restore(player)
+            it.attach(player)
         }
 
         val openApp = PendingIntent.getActivity(
@@ -103,6 +126,7 @@ class PlaybackService : MediaSessionService() {
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
 
     override fun onTaskRemoved(rootIntent: Intent?) {
+        queueStore?.saveNow(session?.player)
         val p = session?.player
         if (p == null || !p.playWhenReady || p.mediaItemCount == 0) {
             pauseAllPlayersAndStopSelf()
@@ -124,6 +148,9 @@ class PlaybackService : MediaSessionService() {
                 sendBroadcast(intent)
             }
         }
+
+        queueStore?.saveNow(session?.player)
+        queueStore?.detach(session?.player)
 
         session?.run {
             player.release()

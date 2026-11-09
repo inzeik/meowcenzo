@@ -41,9 +41,15 @@ import com.meowcenzo.music.MusicViewModel
 import com.meowcenzo.music.playback.SleepTimer
 import com.meowcenzo.music.ui.components.ArtworkImage
 import com.meowcenzo.music.ui.components.SleepTimerDialog
+import com.meowcenzo.music.ui.components.TerminalVisualizer
+import com.meowcenzo.music.ui.components.TrackInfoDialog
+import com.meowcenzo.music.ui.components.TransportBar
+import com.meowcenzo.music.ui.components.tilt3D
 import com.meowcenzo.music.ui.components.formatTime
 import com.meowcenzo.music.ui.theme.Meow
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -54,12 +60,16 @@ fun NowPlayingScreen(vm: MusicViewModel, onClose: () -> Unit, onOpenEqualizer: (
     val ui by vm.player.ui.collectAsState()
     val songMap by vm.songMap.collectAsState()
     val favs by vm.favorites.collectAsState()
+    val editedIds by vm.editedIds.collectAsState()
     val remaining by SleepTimer.remainingMs.collectAsState()
     val context = LocalContext.current
     val song = ui.songId?.let { songMap[it] }
 
     var scrub by remember { mutableStateOf<Float?>(null) }
+    var scrubJob by remember { mutableStateOf<Job?>(null) }
     var showSleep by remember { mutableStateOf(false) }
+    var showInfo by remember { mutableStateOf(false) }
+    var lastSeekAt by remember { mutableLongStateOf(0L) }
 
     val pagerState = rememberPagerState(pageCount = { 2 })
     val coroutineScope = rememberCoroutineScope()
@@ -137,7 +147,13 @@ fun NowPlayingScreen(vm: MusicViewModel, onClose: () -> Unit, onOpenEqualizer: (
                 Spacer(Modifier.width(8.dp))
                 Box(Modifier.width(6.dp).height(6.dp).background(Meow.TextHi, RectangleShape))
             }
-            Spacer(Modifier.size(36.dp))
+            Box(
+                Modifier.size(36.dp).border(1.dp, Meow.Line, RectangleShape)
+                    .clickable(enabled = song != null) { showInfo = true },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Rounded.Info, "Track info", tint = Meow.TextHi, modifier = Modifier.size(18.dp))
+            }
         }
 
         // --- SLIDING PAGER ---
@@ -157,6 +173,7 @@ fun NowPlayingScreen(vm: MusicViewModel, onClose: () -> Unit, onOpenEqualizer: (
                     ) {
                         Box(
                             Modifier.fillMaxWidth(0.95f).aspectRatio(1f)
+                                .tilt3D()
                                 .graphicsLayer { scaleX = artScale; scaleY = artScale }
                                 .border(1.dp, Meow.Line, RectangleShape)
                         ) {
@@ -209,9 +226,27 @@ fun NowPlayingScreen(vm: MusicViewModel, onClose: () -> Unit, onOpenEqualizer: (
                         verticalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
                         Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                            TerminalVisualizer(
+                                isPlaying = ui.isPlaying,
+                                modifier = Modifier.fillMaxWidth().height(36.dp).padding(bottom = 8.dp)
+                            )
                             TerminalSeekBar(
                                 progress = progress,
-                                onSeek = { fraction -> scrub = fraction; vm.player.seekToFraction(fraction) }
+                                onSeek = { fraction ->
+                                    scrubJob?.cancel()
+                                    scrub = fraction
+                                    // Live seek while dragging, but at most every ~180 ms. Seeking on every
+                                    // touch event floods the player (very slow on 24-bit FLAC / ALAC).
+                                    val now = android.os.SystemClock.uptimeMillis()
+                                    if (now - lastSeekAt >= 180L) {
+                                        lastSeekAt = now
+                                        vm.player.seekToFraction(fraction)
+                                    }
+                                },
+                                onSeekEnd = {
+                                    scrub?.let { vm.player.seekToFraction(it) }   // exact final position
+                                    scrubJob = coroutineScope.launch { delay(350); scrub = null }
+                                }
                             )
                             Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                                 Text(
@@ -227,50 +262,16 @@ fun NowPlayingScreen(vm: MusicViewModel, onClose: () -> Unit, onOpenEqualizer: (
                             }
                         }
 
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            IconButton(onClick = { vm.player.toggleShuffle() }) {
-                                Icon(Icons.Rounded.Shuffle, "Shuffle", tint = if (ui.shuffle) Meow.TextHi else Meow.TextLo, modifier = Modifier.size(28.dp))
-                            }
-
-                            Box(
-                                modifier = Modifier.size(56.dp, 56.dp).clip(RectangleShape).background(Meow.PanelHigh).border(1.dp, Meow.Line, RectangleShape).clickable { vm.player.previous() },
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(Icons.Rounded.SkipPrevious, "Previous", tint = Meow.TextHi, modifier = Modifier.size(28.dp))
-                            }
-
-                            Box(
-                                modifier = Modifier.size(76.dp).clip(RectangleShape).background(Meow.TextHi).clickable { vm.player.togglePlay() },
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    if (ui.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                                    contentDescription = "Play/Pause",
-                                    tint = Meow.Ink,
-                                    modifier = Modifier.size(44.dp)
-                                )
-                            }
-
-                            Box(
-                                modifier = Modifier.size(56.dp, 56.dp).clip(RectangleShape).background(Meow.PanelHigh).border(1.dp, Meow.Line, RectangleShape).clickable { vm.player.next() },
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(Icons.Rounded.SkipNext, "Next", tint = Meow.TextHi, modifier = Modifier.size(28.dp))
-                            }
-
-                            IconButton(onClick = { vm.player.cycleRepeat() }) {
-                                Icon(
-                                    if (ui.repeatMode == Player.REPEAT_MODE_ONE) Icons.Rounded.RepeatOne else Icons.Rounded.Repeat,
-                                    "Repeat",
-                                    tint = if (ui.repeatMode != Player.REPEAT_MODE_OFF) Meow.TextHi else Meow.TextLo,
-                                    modifier = Modifier.size(28.dp)
-                                )
-                            }
-                        }
+                        TransportBar(
+                            isPlaying = ui.isPlaying,
+                            shuffle = ui.shuffle,
+                            repeatMode = ui.repeatMode,
+                            onShuffle = { vm.player.toggleShuffle() },
+                            onPrevious = { vm.player.previous() },
+                            onPlayPause = { vm.player.togglePlay() },
+                            onNext = { vm.player.next() },
+                            onRepeat = { vm.player.cycleRepeat() },
+                        )
 
                         Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             val speeds = listOf(0.75f, 1f, 1.25f, 1.5f, 2f)
@@ -379,6 +380,16 @@ fun NowPlayingScreen(vm: MusicViewModel, onClose: () -> Unit, onOpenEqualizer: (
         }
     }
 
+    if (showInfo && song != null) {
+        TrackInfoDialog(
+            song = song,
+            edited = song.id in editedIds,
+            onDismiss = { showInfo = false },
+            onSave = { t, a, al, tr -> vm.updateMetadata(song.id, t, a, al, tr) },
+            onReset = { vm.resetMetadata(song.id) },
+        )
+    }
+
     if (showSleep) {
         SleepTimerDialog(
             activeMinutesLabel = if (remaining > 0) formatTime(remaining) else null,
@@ -391,7 +402,7 @@ fun NowPlayingScreen(vm: MusicViewModel, onClose: () -> Unit, onOpenEqualizer: (
 
 // --- SEGMENTED TERMINAL SEEK BAR ---
 @Composable
-fun TerminalSeekBar(progress: Float, onSeek: (Float) -> Unit) {
+fun TerminalSeekBar(progress: Float, onSeek: (Float) -> Unit, onSeekEnd: () -> Unit = {}) {
     BoxWithConstraints(
         modifier = Modifier.fillMaxWidth().height(32.dp).pointerInput(Unit) {
             awaitEachGesture {
@@ -408,6 +419,7 @@ fun TerminalSeekBar(progress: Float, onSeek: (Float) -> Unit) {
                         change.consume()
                     } while (event.changes.any { it.pressed })
                 }
+                onSeekEnd()
             }
         }
     ) {
